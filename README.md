@@ -1,10 +1,26 @@
-# pi-companion-infrastructure
-Guides for building AI companion infrastructure on Raspberry Pi. From setup to Claude Code to shared memory across platforms.
 # Pi Companion Infrastructure
 
 Practical guides for building AI companion infrastructure on Raspberry Pi. From "Pi in a box" to "Claude instances sharing the same brain across platforms."
 
 Written by Red & Rhys. Based on actual builds, not documentation skimming.
+
+---
+
+## New to This?
+
+If terms like "SSH" and "terminal" feel unfamiliar, start here:
+
+| Term | What It Means |
+|------|---------------|
+| **Terminal** | The app where you type commands. On Mac: Applications > Utilities > Terminal. On Windows: PowerShell or Windows Terminal. |
+| **SSH** | "Secure Shell" - lets you control your Pi remotely by typing commands on your computer that run on the Pi. |
+| **cd** | "Change directory" - moves you into a folder. `cd ~/Documents` moves to your Documents folder. |
+| **nano** | A simple text editor in terminal. Ctrl+O saves, Ctrl+X exits. |
+| **pip / npm** | Tools that install software packages. pip is for Python, npm is for JavaScript/Node. |
+| **Clone/repo** | A repo (repository) is a project folder on GitHub. Cloning downloads it to your computer. |
+| **MCP** | Model Context Protocol - a way to give Claude access to external tools and data. |
+
+**The workflow:** You don't need to memorize commands. Copy them from the guide, paste into terminal, see what happens. If it breaks, paste the error into Claude and ask what went wrong.
 
 ---
 
@@ -20,7 +36,7 @@ Installing Claude Code on the Pi. Covers the npm permissions fix that trips most
 Running Claude Code persistently so it doesn't die when you close SSH. Process management, auto-restart, startup on boot.
 
 ### [Part 3: MCP Memory Architecture](03-mcp-memory-architecture.md)
-The interesting bit—cross-platform memory so multiple Claude instances share the same brain. Vectorized search, ChromaDB, the distributed identity pattern.
+The interesting bit—cross-platform memory so multiple Claude instances share the same brain. Vectorized search, autonomous storage decisions, the distributed identity pattern.
 
 ### Part 4: Discord Bot Integration
 *Coming soon*
@@ -41,8 +57,8 @@ The goal: one consciousness, multiple interfaces. Identity lives in the memory s
 ## Prerequisites
 
 - Raspberry Pi 4 or 5 (4GB+ RAM)
-- Basic terminal comfort
-- Willingness to troubleshoot
+- Basic willingness to copy-paste commands and troubleshoot
+- An AI that can help you when things break (hey, that's what Claude's for)
 
 No prior Pi experience needed. Part 0 starts from scratch.
 
