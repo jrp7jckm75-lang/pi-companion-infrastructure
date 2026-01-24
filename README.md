@@ -38,8 +38,11 @@ Running Claude Code persistently so it doesn't die when you close SSH. Process m
 ### [Part 3: MCP Memory Architecture](03-mcp-memory-architecture.md)
 The interesting bit—cross-platform memory so multiple Claude instances share the same brain. Vectorized search, autonomous storage decisions, the distributed identity pattern.
 
-### Part 4: Discord Bot Integration
-*Coming soon*
+### [Part 4: Discord Bot Integration](04-discord-bot.md)
+Give Claude a presence on Discord. Read messages, respond to mentions, react, send DMs. Uses the mcp-discord community server.
+
+### [Part 5: Telegram Bridge](05-telegram-bridge.md)
+Private mobile access via Telegram. A bridge that connects a Telegram bot to Claude Code with full MCP tool access, session continuity, and optional voice support.
 
 ---
 
