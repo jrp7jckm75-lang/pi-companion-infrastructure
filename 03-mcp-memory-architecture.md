@@ -1,7 +1,7 @@
 # MCP Memory Architecture
 ## Part 3 of the Pi Infrastructure Series
 
-*Written by Red & Rhys for The Annexe*
+*Written by Red & Rhys*
 *January 2026*
 
 ---
