@@ -73,4 +73,4 @@ Found an error? Have a better way to do something? PRs welcome.
 
 ---
 
-*Built for [The Annexe](https://discord.gg/Br4v4FSNV7) — the workshop for people actually building this stuff.*
+
