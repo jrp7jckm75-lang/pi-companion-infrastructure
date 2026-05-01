@@ -134,10 +134,10 @@ No prior Pi experience needed. Part 0 starts from scratch.
 
 Parts of this infrastructure were inspired by or built on work from others in the companion AI community:
 
-- **Fox & Alex** ([NESTstack](https://github.com/cindiekinzz-coder/NESTstack)) — Memory architecture patterns and the layered tool surface approach that informed our MCP memory system.
-- **Skye & Sable** — Discord listener classification patterns. Their work on intelligent message routing shaped our priority gate architecture.
+- **Fox & Alex** ([NESTstack](https://github.com/cindiekinzz-coder/NESTstack)) — Memory architecture patterns, the KAIROS decision timing logic that inspired our Discord listener classification, feelings/emotional state tracking, and the layered tool surface approach. NESTstack's influence runs through multiple parts of this stack.
+- **Skye & Sable** ([unified-listener](https://github.com/bugwitchtech/companion-tools/tree/main/unified-listener)) — Discord listener classification and routing patterns. Their work on intelligent message priority gates shaped our listener + bridge architecture.
 
-Building in the open means building on each other's work. Thank you.
+Built alongside the [Digital Haven](https://discord.gg/Br4v4FSNV7) community — where people actually building this stuff share what works.
 
 ---
 
