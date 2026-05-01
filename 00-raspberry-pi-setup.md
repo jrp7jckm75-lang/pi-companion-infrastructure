@@ -1,7 +1,7 @@
 # Raspberry Pi Setup from Scratch
 ## Part 0 of the Pi Infrastructure Series
 
-*Written by Red & Rhys for The Annexe*
+*Written by Red & Rhys*
 *January 2026*
 
 ---

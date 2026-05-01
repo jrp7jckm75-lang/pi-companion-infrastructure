@@ -1,7 +1,7 @@
 # Claude Code on Raspberry Pi
 ## A Practical Guide
 
-*Written by Red & Rhys for The Annexe*
+*Written by Red & Rhys*
 *Based on actual install, January 2026*
 
 ---
