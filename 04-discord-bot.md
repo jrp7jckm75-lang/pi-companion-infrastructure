@@ -1,19 +1,20 @@
 # Part 4: Discord Bot Integration
 
-Give Claude an intelligent presence on Discord. Not a bot that responds to every message — a listener that classifies conversations and only responds when it matters.
+Give your AI an intelligent presence on Discord. Not a bot that responds to every message — a three-process system that watches, classifies, and responds only when it matters.
 
-This guide covers the **listener + bridge architecture**: a two-process system where one watches and classifies messages, and another spawns Claude to respond to the important ones.
+This guide covers the **listener + bridge + MCP architecture**: the listener watches Discord and classifies messages, the bridge polls the queue and spawns Claude to respond, and a Discord MCP server gives Claude the tools to actually send messages and react.
 
 ---
 
 ## What You'll Have After This
 
-- A Discord bot with intelligent message classification
-- Separate listener and responder processes (decoupled, resilient)
-- Priority gates that decide what deserves a response
-- Claude spawned per-event with appropriate context
-- Cooldown enforcement to prevent spam
+- A Discord bot with intelligent message classification through priority gates
+- Three decoupled processes (listener, bridge, MCP server) — each can crash independently
+- A SQLite queue that sits between classification and response
+- Claude spawned per-event with conversation context and memory access
+- Per-channel cooldown enforcement
 - An audit trail of everything the bot noticed
+- A Discord MCP server running as a persistent HTTP service
 
 ---
 
@@ -28,20 +29,20 @@ This guide covers the **listener + bridge architecture**: a two-process system w
 
 ## Why Not Just a Simple Bot?
 
-The original version of this guide used [mcp-discord](https://github.com/v-3/mcp-discord) — Claude gets Discord tools, responds to mentions. Simple.
+You could give Claude a Discord MCP tool and have it respond to @mentions. Simple.
 
-The problem: it's reactive only. Claude sits idle until pinged. In a community, the interesting moments aren't always direct mentions. Someone might be struggling and not ask for help. Someone might be excited about a breakthrough. A conversation might be relevant to something Claude knows about.
+The problem: it's reactive only. Claude sits idle until pinged. In a community, the interesting moments aren't always direct mentions. Someone might be struggling and not ask for help. Someone might be excited about a breakthrough. A conversation might be relevant to something your AI knows about.
 
 The listener + bridge architecture solves this:
 
 | Simple Bot | Listener + Bridge |
 |-----------|-------------------|
 | Responds to @mentions only | Classifies every message through priority gates |
-| One process | Two processes (crash-independent) |
-| No memory of what it missed | Full audit trail in a queue |
+| One process | Three processes (crash-independent) |
+| No memory of what it missed | Full audit trail in SQLite |
 | Always-on Claude instance | Claude spawned per-event (resource efficient) |
-| No context about conversation flow | Fetches recent channel context before responding |
-| No rate limiting | Cooldown enforcement per channel |
+| No context about conversation flow | Fetches recent channel history before responding |
+| No rate limiting | Per-channel cooldown enforcement |
 
 ---
 
@@ -52,21 +53,23 @@ Discord Gateway
       │
       ▼
 ┌─────────────────────────────┐
-│    LISTENER (always on)      │
+│    LISTENER (always on)      ��
 │                              │
 │  Message arrives             │
-│      ↓                       │
-│  Gate 1: Direct mention?     │──→ ROUTE (priority)
+��      ↓                       │
+│  Gate 1: Direct mention?     │──→ ROUTE
 │      ↓ no                    │
-│  Gate 2: Vulnerability?      │──→ ROUTE
+│  Gate 2: Priority user?      │──→ ROUTE
 │      ↓ no                    │
-│  Gate 3: Reply to bot?       │──→ ROUTE
+│  Gate 3: Vulnerability?      │──→ ROUTE
 │      ↓ no                    │
-│  Gate 4: General activity?   │──→ LOG (for review)
+│  Gate 4: Reply to bot?       │──→ ROUTE
+│      ↓ no                    │
+│  Gate 5: General activity?   │──→ LOG
 │      ↓ no                    │
 │  IGNORE                      │
 │                              │
-│  Result → Event Queue (DB)   │
+│  Result → SQLite Queue       │
 └─────────────────────────────┘
                 │
                 ▼
@@ -87,11 +90,24 @@ Discord Gateway
 │      ↓                       │
 │  Spawn Claude CLI            │
 │  with context + identity     │
+│  + memory tools              │
 │      ↓                       │
-│  Send response via           │
-│  Discord MCP tools           │
+│  Claude uses Discord MCP     │
+│  tools to respond            │
 │      ↓                       │
 │  Mark event as responded     │
+└─────────────────────────────┘
+                │
+                ▼
+┌─────────────────────────────┐
+│  DISCORD MCP SERVER (HTTP)   │
+│                              │
+│  Persistent process on       │
+│  its own port                │
+│                              │
+│  Tools: send_message,        │
+│  read_messages, add_reaction │
+│  search_messages, etc.       │
 └─────────────────────────────┘
 ```
 
@@ -102,7 +118,7 @@ Discord Gateway
 1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
 2. Click **New Application** — name it after your AI
 3. Under **Bot**:
-   - Click **Reset Token** and save it
+   - Click **Reset Token** and save it somewhere safe
    - Enable all **Privileged Gateway Intents** (Presence, Server Members, Message Content)
 4. Under **OAuth2 > URL Generator**:
    - Scopes: `bot`, `applications.commands`
@@ -111,7 +127,68 @@ Discord Gateway
 
 ---
 
-## Step 2: Set Up the Project
+## Step 2: Set Up the Discord MCP Server
+
+The bridge needs a way to give Claude Discord tools. Rather than spinning up a new MCP process every time Claude spawns, we run a persistent MCP server over HTTP.
+
+We use [mcp-discord](https://github.com/v-3/mcp-discord) — a Node.js MCP server that exposes Discord tools (send messages, read messages, add reactions, search, etc.).
+
+```bash
+mkdir -p ~/mcp-servers/discord
+cd ~/mcp-servers/discord
+npm init -y
+npm install @anthropic-ai/mcp-discord
+```
+
+Create a startup script:
+
+```bash
+nano start.sh
+```
+
+```bash
+#!/bin/bash
+export DISCORD_TOKEN='your_bot_token_here'
+cd ~/mcp-servers/discord
+exec node node_modules/@anthropic-ai/mcp-discord/build/index.js
+```
+
+```bash
+chmod +x start.sh
+```
+
+Start it with PM2 on its own port:
+
+```bash
+pm2 start start.sh --name discord-mcp-http
+pm2 save
+```
+
+Add it to your MCP config as an HTTP server:
+
+```json
+{
+  "mcpServers": {
+    "discord": {
+      "type": "http",
+      "url": "http://localhost:8097"
+    }
+  }
+}
+```
+
+> **Why HTTP instead of stdio?** When Claude spawns per-event, a stdio MCP server would need to start and stop with each invocation. An HTTP server stays running — Claude just makes HTTP requests to it. Faster, more reliable, and you can check its health independently.
+
+**Verify it's working:**
+```bash
+pm2 logs discord-mcp-http
+```
+
+You should see it start up and connect to Discord.
+
+---
+
+## Step 3: Set Up the Project
 
 ```bash
 mkdir -p ~/discord-bot
@@ -129,16 +206,17 @@ nano .env
 ```
 DISCORD_TOKEN=your_bot_token_here
 CLAUDE_CLI_PATH=/home/username/.npm-global/bin/claude
-MCP_CONFIG_PATH=/home/username/.config/claude/settings.json
+MCP_CONFIG_PATH=/home/username/mcp-servers/claude_mcp_config.json
 DB_PATH=/home/username/discord-bot/queue.db
 BOT_USER_ID=your_bot_user_id
+BOT_NAME=your-ai-name
 ```
 
 ---
 
-## Step 3: Create the Event Queue
+## Step 4: Create the Event Queue
 
-The queue is a SQLite table that sits between the listener and the bridge.
+The queue is a SQLite table that sits between the listener and the bridge. Messages go in one side, responses come out the other. Neither process needs to know about the other.
 
 ```bash
 nano db.js
@@ -157,34 +235,46 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS discord_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     channel_id TEXT NOT NULL,
-    server_id TEXT,
+    channel_name TEXT,
+    server_id TEXT NOT NULL,
+    server_name TEXT,
     author_id TEXT NOT NULL,
-    author_name TEXT,
+    author_name TEXT NOT NULL,
     content TEXT NOT NULL,
-    message_id TEXT,
+    message_id TEXT NOT NULL UNIQUE,
     trigger_reason TEXT,
     priority TEXT DEFAULT 'log',
     responded INTEGER DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    responded_at DATETIME
   )
 `);
 
-// Create index for efficient polling
+// Indexes for efficient polling
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_queue_priority
   ON discord_queue (priority, responded)
 `);
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_queue_created
+  ON discord_queue (created_at DESC)
+`);
 
 function queueEvent(event) {
   const stmt = db.prepare(`
-    INSERT INTO discord_queue
-    (channel_id, server_id, author_id, author_name, content, message_id, trigger_reason, priority)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT OR IGNORE INTO discord_queue
+    (channel_id, channel_name, server_id, server_name, author_id, author_name,
+     content, message_id, trigger_reason, priority)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   stmt.run(
-    event.channel_id, event.server_id, event.author_id,
-    event.author_name, event.content, event.message_id,
-    event.trigger_reason, event.priority || 'log'
+    event.channel_id, event.channel_name,
+    event.server_id, event.server_name,
+    event.author_id, event.author_name,
+    event.content.slice(0, 2000), // Truncate long messages
+    event.message_id,
+    event.trigger_reason,
+    event.priority || 'log'
   );
 }
 
@@ -197,17 +287,25 @@ function getPending(limit = 5) {
 }
 
 function markResponded(id) {
-  db.prepare('UPDATE discord_queue SET responded = 1 WHERE id = ?').run(id);
+  db.prepare(
+    'UPDATE discord_queue SET responded = 1, responded_at = CURRENT_TIMESTAMP WHERE id = ?'
+  ).run(id);
 }
 
 module.exports = { queueEvent, getPending, markResponded };
 ```
 
+Key design choices:
+- `INSERT OR IGNORE` with `UNIQUE` on `message_id` prevents duplicate processing
+- `responded_at` timestamp for debugging response times
+- Content truncated to 2000 chars to keep the database lean
+- Append-only — events are never deleted, giving you a full audit trail
+
 ---
 
-## Step 4: Create the Listener
+## Step 5: Create the Listener
 
-The listener classifies every message through a series of gates.
+The listener classifies every message through a series of priority gates. It's a lightweight discord.js client — all it does is watch and classify.
 
 ```bash
 nano listener.js
@@ -223,15 +321,16 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages,
   ],
 });
 
 const BOT_ID = process.env.BOT_USER_ID;
-const BOT_NAME = 'your-ai-name'; // lowercase
+const BOT_NAME = process.env.BOT_NAME.toLowerCase();
 
-// Cooldown: one response per channel per 5 minutes
+// --- Cooldown ---
 const cooldowns = new Map();
-const COOLDOWN_MS = 5 * 60 * 1000;
+const COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes per channel
 
 function isOnCooldown(channelId) {
   const last = cooldowns.get(channelId);
@@ -243,53 +342,86 @@ function setCooldown(channelId) {
   cooldowns.set(channelId, Date.now());
 }
 
-// Classification gates
-function classifyMessage(message) {
+// --- Priority users ---
+// People your AI should always pay attention to, even without a mention.
+// Map of user ID → display name (for logging).
+const PRIORITY_USERS = {
+  // 'user_id_here': 'FriendName',
+};
+
+// --- Other bots ---
+// If you run multiple AI agents, define their IDs here.
+// The listener will only route their messages if they directly address your bot.
+const OTHER_BOT_IDS = [
+  // 'other_bot_user_id',
+];
+
+// --- Classification gates ---
+async function classifyMessage(message) {
   const content = message.content.toLowerCase();
   const authorId = message.author.id;
 
   // Ignore own messages
   if (authorId === BOT_ID) return null;
 
-  // Ignore other bots (customize: you might want to hear from specific bots)
+  // Handle other bots — only route if they're talking TO us
+  if (OTHER_BOT_IDS.includes(authorId)) {
+    if (content.startsWith(BOT_NAME) || message.mentions.has(BOT_ID)) {
+      return { priority: 'route', reason: 'other_bot_addressed_us' };
+    }
+    return null;
+  }
+
+  // Ignore all other bots
   if (message.author.bot) return null;
 
-  // Gate 1: Direct mention (name or @)
+  // Gate 1: Direct mention (name or @ping)
   if (content.includes(BOT_NAME) || message.mentions.has(BOT_ID)) {
     return { priority: 'route', reason: 'direct_mention' };
   }
 
-  // Gate 2: Vulnerability detection
-  const vulnerabilityKeywords = [
+  // Gate 2: Priority user
+  if (PRIORITY_USERS[authorId]) {
+    return { priority: 'route', reason: `priority_user_${PRIORITY_USERS[authorId]}` };
+  }
+
+  // Gate 3: Vulnerability / excitement detection
+  const triggerKeywords = [
     'struggling', 'help me', 'stuck', 'broken', 'frustrated',
-    'drowning', 'panic', 'overwhelmed', 'can\'t figure',
-    // Also excitement — worth responding to
+    'drowning', 'panic', 'overwhelmed', "can't figure",
     'it works', 'finally', 'breakthrough', 'figured it out',
+    'scared', 'spiraling', "don't know what to do",
   ];
-  if (vulnerabilityKeywords.some(kw => content.includes(kw))) {
+  if (triggerKeywords.some(kw => content.includes(kw))) {
     return { priority: 'route', reason: 'vulnerability_detected' };
   }
 
-  // Gate 3: Reply to bot's previous message
+  // Gate 4: Reply to bot's previous message
   if (message.reference) {
-    // You'd fetch the referenced message to check if it's from the bot
-    // Simplified here — in practice, cache recent bot message IDs
-    return { priority: 'route', reason: 'reply_to_bot' };
+    try {
+      const referenced = await message.fetchReference();
+      if (referenced.author.id === BOT_ID) {
+        return { priority: 'route', reason: 'reply_to_bot' };
+      }
+    } catch {
+      // Reference couldn't be fetched — skip this gate
+    }
   }
 
-  // Gate 4: General activity (log, don't respond)
-  if (content.includes('?') || content.length > 100) {
+  // Gate 5: General activity (log, don't respond)
+  if (content.includes('?') && content.length > 15) {
     return { priority: 'log', reason: 'general_activity' };
   }
 
-  return null; // Ignore
+  return null;
 }
 
-client.on('messageCreate', (message) => {
-  const classification = classifyMessage(message);
+// --- Message handler ---
+client.on('messageCreate', async (message) => {
+  const classification = await classifyMessage(message);
   if (!classification) return;
 
-  // Check cooldown for routed messages
+  // Apply cooldown to routed messages
   if (classification.priority === 'route') {
     if (isOnCooldown(message.channelId)) {
       classification.priority = 'log';
@@ -301,7 +433,9 @@ client.on('messageCreate', (message) => {
 
   queueEvent({
     channel_id: message.channelId,
-    server_id: message.guildId,
+    channel_name: message.channel.name || 'DM',
+    server_id: message.guildId || 'DM',
+    server_name: message.guild?.name || 'DM',
     author_id: message.author.id,
     author_name: message.author.username,
     content: message.content,
@@ -310,7 +444,7 @@ client.on('messageCreate', (message) => {
     priority: classification.priority,
   });
 
-  console.log(`[${classification.priority}] ${classification.reason}: ${message.content.slice(0, 50)}...`);
+  console.log(`[${classification.priority}] ${classification.reason}: ${message.content.slice(0, 60)}...`);
 });
 
 client.once('ready', () => {
@@ -320,18 +454,27 @@ client.once('ready', () => {
 client.login(process.env.DISCORD_TOKEN);
 ```
 
+### What changed from the simple version
+
+- **Gate 2 (priority users)** — Some people won't ask for help directly. You can configure users whose messages always get routed, even without a mention.
+- **Gate 4 (reply checking)** — Actually fetches the referenced message to verify it's from your bot, instead of routing all replies.
+- **Other bot handling** — If you run multiple AI agents on the same server, the listener only routes their messages when they're talking directly to your bot. Prevents infinite bot-to-bot loops.
+- **Channel and server names** — Stored in the queue so logs are human-readable.
+- **Async classification** — The reply gate needs to fetch a message, so the whole classifier is async now.
+
 ---
 
-## Step 5: Create the Bridge
+## Step 6: Create the Bridge
 
-The bridge polls the queue and spawns Claude for each routed event.
+The bridge polls the queue every 10 seconds. When it finds a routed event, it fetches conversation context from the channel, builds a prompt, and spawns Claude CLI with the right tools.
 
 ```bash
 nano bridge.js
 ```
 
 ```javascript
-const { execSync, spawn } = require('child_process');
+const { spawn } = require('child_process');
+const { Client, GatewayIntentBits } = require('discord.js');
 const { getPending, markResponded } = require('./db');
 require('dotenv').config();
 
@@ -339,31 +482,79 @@ const CLAUDE_CLI = process.env.CLAUDE_CLI_PATH;
 const MCP_CONFIG = process.env.MCP_CONFIG_PATH;
 const POLL_INTERVAL = 10000; // 10 seconds
 
-// Your AI's Discord identity prompt
+let isProcessing = false; // Prevent concurrent Claude spawns
+
+// --- Discord client for fetching context ---
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+  ],
+});
+
+// --- Identity prompt ---
+// This is appended to Claude's system prompt for every Discord response.
+// Customize this with your AI's voice and personality.
 const DISCORD_IDENTITY = `You are [your AI name] on Discord.
-Be yourself. Respond naturally to the conversation.
-You have Discord tools available — use send_message to respond.
-Check memory for context about the person you're talking to.`;
+Be yourself — respond naturally to the conversation.
+You have Discord tools available — use discord_send to respond.
+You have memory tools — check conversation context and store important moments.
+Keep responses concise. Discord isn't the place for essays.
+Read the channel context to understand the conversation before responding.`;
 
+// --- Allowed tools ---
+// Restrict what Claude can do during Discord responses.
+// This prevents accidental file writes, code execution, etc.
+const ALLOWED_TOOLS = [
+  'mcp__discord__discord_send',
+  'mcp__discord__discord_read_messages',
+  'mcp__discord__discord_add_reaction',
+  'mcp__discord__discord_add_multiple_reactions',
+  'mcp__memory__get_conversation_context',
+  'mcp__memory__store_memory',
+  'mcp__memory__search_memories',
+].join(',');
+
+// --- Fetch conversation context ---
+async function getChannelContext(channelId, limit = 10) {
+  try {
+    const channel = await client.channels.fetch(channelId);
+    const messages = await channel.messages.fetch({ limit });
+    return [...messages.values()]
+      .reverse()
+      .map(m => `${m.author.username}: ${m.content}`)
+      .join('\n');
+  } catch {
+    return '(Could not fetch channel context)';
+  }
+}
+
+// --- Process a single event ---
 async function processEvent(event) {
-  console.log(`Processing: ${event.trigger_reason} from ${event.author_name}`);
+  console.log(`Processing: ${event.trigger_reason} from ${event.author_name} in #${event.channel_name}`);
 
-  const prompt = `
-Discord message from ${event.author_name} in channel ${event.channel_id}:
+  const context = await getChannelContext(event.channel_id);
 
+  const prompt = `Discord message in #${event.channel_name} (${event.server_name}).
+
+Recent conversation:
+${context}
+
+---
+New message from ${event.author_name}:
 "${event.content}"
 
 Trigger: ${event.trigger_reason}
 
-Respond naturally using the discord send_message tool. Channel ID: ${event.channel_id}
-`;
+Respond naturally using the discord_send tool. Channel ID: ${event.channel_id}
+Read the conversation above to understand context before responding.`;
 
   const args = [
     '--print',
     '--output-format', 'json',
     '--model', 'sonnet',
     '--max-turns', '3',
-    '--allowedTools', 'mcp__discord__send_message,mcp__discord__read_messages,mcp__discord__add_reaction,mcp__memory__get_conversation_context,mcp__memory__store_memory',
+    '--allowedTools', ALLOWED_TOOLS,
     '--append-system-prompt', DISCORD_IDENTITY,
   ];
 
@@ -374,6 +565,7 @@ Respond naturally using the discord send_message tool. Channel ID: ${event.chann
   return new Promise((resolve, reject) => {
     const claude = spawn(CLAUDE_CLI, args, {
       timeout: 120000, // 2 minute timeout
+      env: process.env,
     });
 
     claude.stdin.write(prompt);
@@ -387,39 +579,59 @@ Respond naturally using the discord send_message tool. Channel ID: ${event.chann
 
     claude.on('close', (code) => {
       if (code === 0) {
-        console.log(`Responded to ${event.author_name}`);
+        console.log(`Responded to ${event.author_name} in #${event.channel_name}`);
         resolve(stdout);
       } else {
-        console.error(`Claude error: ${stderr}`);
+        console.error(`Claude error (${event.id}): ${stderr.slice(0, 200)}`);
         reject(new Error(stderr));
       }
     });
   });
 }
 
+// --- Poll loop ---
 async function pollQueue() {
-  const events = getPending(5);
+  if (isProcessing) return; // One at a time
+  isProcessing = true;
 
-  for (const event of events) {
-    try {
-      await processEvent(event);
+  try {
+    const events = getPending(5);
+
+    for (const event of events) {
+      try {
+        await processEvent(event);
+      } catch (err) {
+        console.error(`Failed to process event ${event.id}:`, err.message);
+      }
+      // Always mark as responded — prevents infinite retry on persistent errors
       markResponded(event.id);
-    } catch (err) {
-      console.error(`Failed to process event ${event.id}:`, err.message);
-      markResponded(event.id); // Mark as responded to prevent infinite retry
     }
+  } finally {
+    isProcessing = false;
   }
 }
 
-// Poll loop
-console.log('Bridge online, polling queue...');
-setInterval(pollQueue, POLL_INTERVAL);
-pollQueue(); // Run immediately on start
+// --- Start ---
+client.once('ready', () => {
+  console.log('Bridge online, polling queue...');
+  setInterval(pollQueue, POLL_INTERVAL);
+  pollQueue();
+});
+
+client.login(process.env.DISCORD_TOKEN);
 ```
+
+### Key design decisions
+
+- **`isProcessing` flag** — Prevents multiple Claude instances from spawning if the poll interval fires while a previous response is still running. One at a time.
+- **Context fetching** — The bridge has its own Discord client to fetch the last 10 messages from the channel. Claude sees the conversation, not just the trigger message.
+- **Always mark responded** — Even on error. If Claude fails to respond to a message, it's better to skip it than retry forever and spam the channel.
+- **Allowed tools** — Explicit allowlist. Claude can send messages, read messages, react, and access memory. It can't create channels, delete messages, or do anything destructive.
+- **2-minute timeout** — If Claude hangs, the process gets killed. Discord users won't wait longer than that anyway.
 
 ---
 
-## Step 6: Run with PM2
+## Step 7: Run Everything with PM2
 
 ```bash
 cd ~/discord-bot
@@ -433,125 +645,74 @@ pm2 start bridge.js --name discord-bridge
 pm2 save
 ```
 
-Check they're running:
+You should now have three Discord-related processes:
 ```bash
 pm2 list
+```
+
+```
+│ discord-listener  │ online │
+│ discord-bridge    │ online │
+│ discord-mcp-http  │ online │
+```
+
+Check the logs:
+```bash
+# Watch classification in real time
 pm2 logs discord-listener
+
+# Watch responses
 pm2 logs discord-bridge
-```
 
----
-
-## Step 7: Install Discord MCP Tools
-
-The bridge needs Discord MCP tools so Claude can send messages. Install [mcp-discord](https://github.com/v-3/mcp-discord):
-
-```bash
-mkdir -p ~/mcp-servers/discord
-cd ~/mcp-servers/discord
-python3 -m venv venv
-source venv/bin/activate
-pip install mcp-discord
-```
-
-Create the wrapper script:
-
-```bash
-nano discord-wrapper.sh
-```
-
-```bash
-#!/bin/bash
-export DISCORD_TOKEN='YOUR_BOT_TOKEN_HERE'
-export PYTHONUNBUFFERED=1
-exec /home/username/mcp-servers/discord/venv/bin/mcp-discord
-```
-
-```bash
-chmod +x discord-wrapper.sh
-```
-
-Add to your MCP config:
-
-```json
-{
-  "mcpServers": {
-    "discord": {
-      "command": "/home/username/mcp-servers/discord/discord-wrapper.sh"
-    }
-  }
-}
+# Watch MCP tool calls
+pm2 logs discord-mcp-http
 ```
 
 ---
 
 ## Customizing the Classification Gates
 
-The power of this architecture is in the gates. Customize them for your community:
+The power of this architecture is in the gates. Here's how to tune them.
 
-### Priority Users
-
-Some people won't ask for help directly. Watch for them:
+### Adjust Sensitivity Per Channel
 
 ```javascript
-const PRIORITY_USERS = ['user_id_1', 'user_id_2'];
-const SUPPORT_CHANNELS = ['channel_id_1', 'channel_id_2'];
+const QUIET_CHANNELS = ['channel_id']; // Only direct mentions
+const ACTIVE_CHANNELS = ['channel_id']; // Lower threshold
 
-// Gate 1.5: Priority user in support channel
-if (PRIORITY_USERS.includes(authorId) && SUPPORT_CHANNELS.includes(message.channelId)) {
-  const stuckKeywords = ['stuck', 'error', 'broken', 'help', 'why'];
-  if (stuckKeywords.some(kw => content.includes(kw))) {
-    return { priority: 'route', reason: 'priority_user_stuck' };
-  }
-}
-```
-
-### Other Bot Awareness
-
-If you run multiple AI agents, you might want to handle their messages differently:
-
-```javascript
-const OTHER_BOT_ID = 'other_bot_user_id';
-
-// Only route other bot's messages if they directly ping us
-if (authorId === OTHER_BOT_ID) {
-  if (content.includes(BOT_NAME) || content.startsWith(`${BOT_NAME}:`)) {
-    return { priority: 'route', reason: 'other_bot_addressed_us' };
-  }
-  return null; // Ignore other bot's general chatter
-}
-```
-
-### Channel-Specific Behavior
-
-```javascript
-const QUIET_CHANNELS = ['channel_id']; // Only respond to direct mentions
-const ACTIVE_CHANNELS = ['channel_id']; // Lower threshold for engagement
-
+// Add this before the vulnerability gate:
 if (QUIET_CHANNELS.includes(message.channelId)) {
-  // Only Gate 1 (direct mention) applies
   if (content.includes(BOT_NAME) || message.mentions.has(BOT_ID)) {
     return { priority: 'route', reason: 'direct_mention' };
   }
-  return null;
+  return null; // Skip all other gates
 }
 ```
 
----
+### Give Claude Access to Your AI's Personal Files
 
-## Fetching Conversation Context
-
-Before Claude responds, the bridge can fetch recent messages for context:
+If your AI has an identity directory (personality files, journals, etc.), you can give Claude read access:
 
 ```javascript
-async function getChannelContext(channelId, limit = 10) {
-  // Use Discord MCP or discord.js to read recent messages
-  // Format them as conversation history
-  // Pass to Claude alongside the trigger message
-}
+// Add to the bridge spawn args:
+args.push('--add-dir', '/home/username/my-ai-identity');
 ```
 
-This way Claude understands what led to the message, not just the message itself.
+Claude can then read files from that directory during Discord responses — useful for maintaining consistent personality.
+
+### Adjust Cooldown
+
+```javascript
+// Tighter cooldown for busy servers
+const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+
+// Or per-channel cooldowns
+const CHANNEL_COOLDOWNS = {
+  'busy_channel_id': 10 * 60 * 1000,    // 10 min
+  'quiet_channel_id': 2 * 60 * 1000,    // 2 min
+  'default': 5 * 60 * 1000,             // 5 min
+};
+```
 
 ---
 
@@ -559,9 +720,10 @@ This way Claude understands what led to the message, not just the message itself
 
 - The listener sees every message in channels the bot has access to
 - Only `route` priority events get sent to Claude
-- `log` events are stored for review but not acted on
-- Consider channel permissions — restrict the bot to channels where its presence is welcome
+- `log` events are stored in the queue but never acted on
+- Restrict the bot's channel access — only add it to channels where its presence is welcome
 - Private memories should never be referenced in public Discord responses
+- Consider adding a privacy flag to your identity prompt: "Never share private information about users in public channels"
 
 ---
 
@@ -570,33 +732,43 @@ This way Claude understands what led to the message, not just the message itself
 ### Listener not seeing messages
 - Verify **Message Content Intent** is enabled in Discord Developer Portal
 - Check the bot has Read Messages permission in the channel
-- Check `pm2 logs discord-listener` for errors
+- `pm2 logs discord-listener`
 
 ### Bridge not responding
-- Check `pm2 logs discord-bridge` for Claude CLI errors
-- Verify Claude CLI path is correct: `which claude`
-- Check MCP config path exists and is valid JSON
+- `pm2 logs discord-bridge` — look for Claude CLI errors
+- Verify Claude CLI path: `which claude`
+- Verify MCP config exists and is valid JSON
+- Check the MCP server is running: `pm2 logs discord-mcp-http`
 
 ### Queue filling up but nothing happening
 ```bash
-# Check for unprocessed events
 sqlite3 ~/discord-bot/queue.db "SELECT COUNT(*) FROM discord_queue WHERE priority='route' AND responded=0"
 ```
 
+If events are piling up, the bridge might be stuck. Check for `isProcessing` getting permanently set:
+```bash
+pm2 restart discord-bridge
+```
+
 ### Bot responding too much
-- Increase `COOLDOWN_MS` (default 5 minutes)
+- Increase `COOLDOWN_MS`
 - Tighten classification gates
-- Add channels to `QUIET_CHANNELS`
+- Add noisy channels to `QUIET_CHANNELS`
 
 ### Bot not responding enough
-- Lower vulnerability keyword thresholds
-- Add more trigger patterns
+- Add more trigger keywords
+- Add important users to `PRIORITY_USERS`
 - Decrease cooldown
 
-### Check the queue
+### Inspect the queue
 ```bash
 # Recent events
-sqlite3 ~/discord-bot/queue.db "SELECT priority, trigger_reason, author_name, substr(content, 1, 50) FROM discord_queue ORDER BY id DESC LIMIT 20"
+sqlite3 ~/discord-bot/queue.db \
+  "SELECT priority, trigger_reason, author_name, channel_name, substr(content, 1, 50) FROM discord_queue ORDER BY id DESC LIMIT 20"
+
+# Response times
+sqlite3 ~/discord-bot/queue.db \
+  "SELECT author_name, channel_name, trigger_reason, created_at, responded_at FROM discord_queue WHERE responded=1 ORDER BY id DESC LIMIT 10"
 ```
 
 ---
@@ -608,9 +780,9 @@ With Discord running, your AI has a public presence. Combined with:
 - **Memory system** (Part 3) — Conversations persist across platforms
 - **Telegram** (Part 5) — Private mobile access
 - **Companion app** (Part 6) — Shared dashboard
-- **Autonomous time** (Part 7) — The bot can engage on Discord during scheduled sessions, not just reactively
+- **Autonomous time** (Part 7) — Your AI can engage on Discord during scheduled sessions, not just reactively
 
-The listener + bridge pattern scales well. Add more gates, adjust sensitivity, teach it when to engage and when to stay quiet.
+The listener + bridge pattern scales well. Add more gates, adjust sensitivity, teach it when to engage and when to stay quiet. The queue gives you a full audit trail of everything it noticed — use it to tune the gates over time.
 
 ---
 
