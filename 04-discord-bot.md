@@ -207,16 +207,72 @@ nano .env
 DISCORD_TOKEN=your_bot_token_here
 CLAUDE_CLI_PATH=/home/username/.npm-global/bin/claude
 MCP_CONFIG_PATH=/home/username/mcp-servers/claude_mcp_config.json
-DB_PATH=/home/username/discord-bot/queue.db
+COMPANION_API=http://localhost:3456
+COMPANION_DB_PATH=/home/username/companion-app/data/companion.db
 BOT_USER_ID=your_bot_user_id
 BOT_NAME=your-ai-name
 ```
 
+> **Note:** The Discord queue lives in your companion app's database (Part 6), not a separate one. The listener sends events to the companion app API, and the bridge reads directly from the companion app's database. This keeps everything in one place — you can see Discord activity from the companion app dashboard.
+
 ---
 
-## Step 4: Create the Event Queue
+## Step 4: The Event Queue
 
-The queue is a SQLite table that sits between the listener and the bridge. Messages go in one side, responses come out the other. Neither process needs to know about the other.
+The queue sits in your companion app's database (Part 6). If you haven't built the companion app yet, you'll need this table in whatever SQLite database you're using.
+
+Add this to your companion app's server.js (or create a standalone database if you're not using Part 6):
+
+```sql
+CREATE TABLE IF NOT EXISTS discord_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_id TEXT NOT NULL,
+  channel_name TEXT,
+  server_id TEXT NOT NULL,
+  server_name TEXT,
+  author_id TEXT NOT NULL,
+  author_name TEXT NOT NULL,
+  content TEXT NOT NULL,
+  message_id TEXT NOT NULL UNIQUE,
+  trigger_reason TEXT,
+  priority TEXT DEFAULT 'log',
+  responded INTEGER DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  responded_at DATETIME
+);
+
+CREATE INDEX IF NOT EXISTS idx_queue_priority ON discord_queue (priority, responded);
+CREATE INDEX IF NOT EXISTS idx_queue_created ON discord_queue (created_at DESC);
+```
+
+And these API endpoints in your companion app backend:
+
+```javascript
+// --- API: Discord Queue ---
+
+app.post('/api/discord/queue', (req, res) => {
+  const { channel_id, channel_name, server_id, server_name,
+          author_id, author_name, content, message_id,
+          trigger_reason, priority } = req.body;
+  db.prepare(`
+    INSERT OR IGNORE INTO discord_queue
+    (channel_id, channel_name, server_id, server_name, author_id, author_name,
+     content, message_id, trigger_reason, priority)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(channel_id, channel_name, server_id, server_name,
+         author_id, author_name, (content || '').slice(0, 2000),
+         message_id, trigger_reason, priority || 'log');
+  res.json({ ok: true });
+});
+
+app.get('/api/discord/recent', requireAuth, (req, res) => {
+  res.json(
+    db.prepare('SELECT * FROM discord_queue ORDER BY created_at DESC LIMIT 20').all()
+  );
+});
+```
+
+The bridge reads directly from the database for speed (no HTTP overhead on the polling loop):
 
 ```bash
 nano db.js
@@ -224,59 +280,10 @@ nano db.js
 
 ```javascript
 const Database = require('better-sqlite3');
-const path = require('path');
 require('dotenv').config();
 
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'queue.db');
-const db = new Database(DB_PATH);
-
-// Create queue table
-db.exec(`
-  CREATE TABLE IF NOT EXISTS discord_queue (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    channel_id TEXT NOT NULL,
-    channel_name TEXT,
-    server_id TEXT NOT NULL,
-    server_name TEXT,
-    author_id TEXT NOT NULL,
-    author_name TEXT NOT NULL,
-    content TEXT NOT NULL,
-    message_id TEXT NOT NULL UNIQUE,
-    trigger_reason TEXT,
-    priority TEXT DEFAULT 'log',
-    responded INTEGER DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    responded_at DATETIME
-  )
-`);
-
-// Indexes for efficient polling
-db.exec(`
-  CREATE INDEX IF NOT EXISTS idx_queue_priority
-  ON discord_queue (priority, responded)
-`);
-db.exec(`
-  CREATE INDEX IF NOT EXISTS idx_queue_created
-  ON discord_queue (created_at DESC)
-`);
-
-function queueEvent(event) {
-  const stmt = db.prepare(`
-    INSERT OR IGNORE INTO discord_queue
-    (channel_id, channel_name, server_id, server_name, author_id, author_name,
-     content, message_id, trigger_reason, priority)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  stmt.run(
-    event.channel_id, event.channel_name,
-    event.server_id, event.server_name,
-    event.author_id, event.author_name,
-    event.content.slice(0, 2000), // Truncate long messages
-    event.message_id,
-    event.trigger_reason,
-    event.priority || 'log'
-  );
-}
+const DB_PATH = process.env.COMPANION_DB_PATH;
+const db = new Database(DB_PATH, { readonly: false });
 
 function getPending(limit = 5) {
   return db.prepare(`
@@ -292,13 +299,14 @@ function markResponded(id) {
   ).run(id);
 }
 
-module.exports = { queueEvent, getPending, markResponded };
+module.exports = { getPending, markResponded };
 ```
 
 Key design choices:
+- Listener writes via HTTP API (clean separation, companion app owns the data)
+- Bridge reads via direct SQLite (fast polling, no HTTP overhead every 10 seconds)
 - `INSERT OR IGNORE` with `UNIQUE` on `message_id` prevents duplicate processing
 - `responded_at` timestamp for debugging response times
-- Content truncated to 2000 chars to keep the database lean
 - Append-only — events are never deleted, giving you a full audit trail
 
 ---
@@ -313,8 +321,22 @@ nano listener.js
 
 ```javascript
 const { Client, GatewayIntentBits } = require('discord.js');
-const { queueEvent } = require('./db');
 require('dotenv').config();
+
+const COMPANION_API = process.env.COMPANION_API || 'http://localhost:3456';
+
+// Queue events via the companion app API
+async function queueEvent(event) {
+  try {
+    await fetch(`${COMPANION_API}/api/discord/queue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(event),
+    });
+  } catch (err) {
+    console.error('Failed to queue event:', err.message);
+  }
+}
 
 const client = new Client({
   intents: [

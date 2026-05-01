@@ -238,6 +238,27 @@ db.exec(`
     completed INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  -- Discord queue (used by Part 4: Discord Bot)
+  CREATE TABLE IF NOT EXISTS discord_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id TEXT NOT NULL,
+    channel_name TEXT,
+    server_id TEXT NOT NULL,
+    server_name TEXT,
+    author_id TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    content TEXT NOT NULL,
+    message_id TEXT NOT NULL UNIQUE,
+    trigger_reason TEXT,
+    priority TEXT DEFAULT 'log',
+    responded INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    responded_at DATETIME
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_discord_priority ON discord_queue (priority, responded);
+  CREATE INDEX IF NOT EXISTS idx_discord_created ON discord_queue (created_at DESC);
 `);
 
 
@@ -380,6 +401,30 @@ app.get('/api/chat/stream', requireAuth, (req, res) => {
   }, 1000); // Check every second
 
   req.on('close', () => clearInterval(interval));
+});
+
+
+// --- API: Discord Queue (used by Part 4) ---
+
+app.post('/api/discord/queue', (req, res) => {
+  const { channel_id, channel_name, server_id, server_name,
+          author_id, author_name, content, message_id,
+          trigger_reason, priority } = req.body;
+  db.prepare(`
+    INSERT OR IGNORE INTO discord_queue
+    (channel_id, channel_name, server_id, server_name, author_id, author_name,
+     content, message_id, trigger_reason, priority)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(channel_id, channel_name, server_id, server_name,
+         author_id, author_name, (content || '').slice(0, 2000),
+         message_id, trigger_reason, priority || 'log');
+  res.json({ ok: true });
+});
+
+app.get('/api/discord/recent', requireAuth, (req, res) => {
+  res.json(
+    db.prepare('SELECT * FROM discord_queue ORDER BY created_at DESC LIMIT 20').all()
+  );
 });
 
 
