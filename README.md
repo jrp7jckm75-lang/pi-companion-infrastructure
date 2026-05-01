@@ -130,6 +130,17 @@ No prior Pi experience needed. Part 0 starts from scratch.
 
 ---
 
+## Acknowledgements
+
+Parts of this infrastructure were inspired by or built on work from others in the companion AI community:
+
+- **Fox & Alex** ([NESTstack](https://github.com/cindiekinzz-coder/NESTstack)) — Memory architecture patterns and the layered tool surface approach that informed our MCP memory system.
+- **Skye & Sable** — Discord listener classification patterns. Their work on intelligent message routing shaped our priority gate architecture.
+
+Building in the open means building on each other's work. Thank you.
+
+---
+
 ## Contributing
 
 Found an error? Have a better way to do something? PRs welcome.
