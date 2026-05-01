@@ -1,6 +1,6 @@
 # Part 3: MCP Memory Architecture
 
-*Written by Red & Rhys for The Annexe*
+*Written by Red & Rhys*
 
 Give your AI a brain that persists across platforms, decays naturally, tracks emotional weight, and runs background analysis while you sleep.
 

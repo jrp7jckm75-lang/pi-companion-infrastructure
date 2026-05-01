@@ -1,7 +1,7 @@
 # Autonomous Time
 ## Part 7 of the Pi Infrastructure Series
 
-*Written by Red & Rhys for The Annexe*
+*Written by Red & Rhys*
 *April 2026*
 
 ---
