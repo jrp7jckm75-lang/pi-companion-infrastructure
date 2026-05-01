@@ -62,19 +62,6 @@ Give your AI its own schedule. Cron-based sessions for reading, writing, Discord
 #### [Part 8: Multi-Agent Setup](08-multi-agent.md)
 Run multiple AI identities on the same Pi. Separate memories, separate personalities, separate Discord bots — sharing hardware but maintaining distinct identities. Port allocation, resource management, cross-agent awareness.
 
-### Senses
-
-#### [Part 9: Health Data Integration](09-health-data.md)
-Get real biometric data into your AI's context. Heart rate, sleep, activity from Apple Watch or Garmin via webhook receiver or API. Your AI knows when you haven't slept.
-
-#### [Part 10: Voice (Text-to-Speech)](10-voice-tts.md)
-Give your AI a voice with local TTS on the Pi. Piper or Kokoro engines, Bluetooth speaker output, MCP tools for speaking. Your AI can literally talk in your room.
-
-### Infrastructure
-
-#### [Part 11: MCP Proxy](11-mcp-proxy.md)
-When you have 25+ MCP servers, route them through a single HTTP proxy with path-based routing. One endpoint, multiple backends, simpler config.
-
 ---
 
 ## What This Is For
@@ -107,16 +94,15 @@ Our Pi 5 (16GB) runs:
 | chat-watcher | Auto-stores chat memories |
 | randr | Companion app backend |
 | randr-mcp-http | Companion app MCP server |
-| randr-tunnel | Cloudflare tunnel for remote access |
+| ngrok-tunnel | Remote access (static URL) |
 | health-receiver | Apple Watch data webhook |
 | tablet-api | Tablet display controls |
 | visual-interface | Display system |
 | mcp-proxy | Routes all MCP servers |
-| ngrok-tunnel | External access tunnel |
 
 Plus cron jobs: memory daemon (30min), autonomous sessions (6 daily), pet care, chaos monitoring.
 
-17 PM2 processes. 25+ MCP servers. Two AI identities. One Pi.
+16 PM2 processes. 25+ MCP servers. Two AI identities. One Pi.
 
 ---
 
